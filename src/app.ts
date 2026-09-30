@@ -123,7 +123,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     || DEFAULT_ORIGINS
   ));
   const docsEnabled = options.docsEnabled ?? process.env.DOCS_ENABLED !== "false";
-  const maxRequests = options.rateLimitMax ?? Number(process.env.RATE_LIMIT_MAX) || 120;
+  const maxRequests = options.rateLimitMax ?? (Number(process.env.RATE_LIMIT_MAX) || 120);
 
   const app = Fastify({
     logger: process.env.NODE_ENV !== "test",
