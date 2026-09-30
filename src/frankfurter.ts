@@ -1,4 +1,10 @@
-import type { CurrencyInfo, CurrencyProvider, CurrencyRate, RateRequest } from "./types.js";
+import type {
+  CurrencyInfo,
+  CurrencyProvider,
+  CurrencyRate,
+  RateRequest,
+  RatesRequest,
+} from "./types.js";
 
 export class CurrencyProviderError extends Error {
   constructor(
@@ -39,6 +45,13 @@ function normalizeRate(value: unknown): CurrencyRate {
     quote: value.quote.toUpperCase(),
     rate: value.rate,
   };
+}
+
+function normalizeRates(value: unknown): CurrencyRate[] {
+  if (!Array.isArray(value)) {
+    throw new CurrencyProviderError(502, "Az árfolyam-szolgáltató érvénytelen árfolyamlistát adott.");
+  }
+  return value.map(normalizeRate);
 }
 
 function normalizeCurrencies(value: unknown): CurrencyInfo[] {
@@ -91,6 +104,20 @@ export class FrankfurterClient implements CurrencyProvider {
       `/rate/${encodeURIComponent(from)}/${encodeURIComponent(to)}${query}`,
     );
     return normalizeRate(payload);
+  }
+
+  async getRates(input: RatesRequest): Promise<CurrencyRate[]> {
+    const base = input.base.toUpperCase();
+    const quotes = [...new Set(input.quotes.map((quote) => quote.toUpperCase()))];
+    const params = new URLSearchParams({
+      base,
+      quotes: quotes.join(","),
+    });
+    if (input.date) params.set("date", input.date);
+    if (input.provider) params.set("providers", input.provider.toUpperCase());
+
+    const rates = normalizeRates(await this.request<unknown>(`/rates?${params.toString()}`));
+    return rates.filter((rate) => rate.base === base && quotes.includes(rate.quote));
   }
 
   async getCurrencies(input: { provider?: string } = {}): Promise<CurrencyInfo[]> {
