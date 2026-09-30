@@ -13,6 +13,14 @@ const provider: CurrencyProvider = {
       rate: 390.25,
     };
   },
+  async getRates(input) {
+    return input.quotes.map((quote, index) => ({
+      date: input.date ?? "2026-09-30",
+      base: input.base.toUpperCase(),
+      quote: quote.toUpperCase(),
+      rate: index === 0 ? 390.25 : 1.17 + index,
+    }));
+  },
   async getCurrencies() {
     return [
       {
@@ -83,6 +91,26 @@ describe("currency API", () => {
     });
   });
 
+  it("returns multiple rates in one request", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/rates?base=eur&quotes=huf,usd,gbp&provider=ecb",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.meta).toMatchObject({
+      count: 3,
+      source: "Frankfurter v2",
+      provider: "ECB",
+    });
+    expect(body.data).toEqual([
+      { date: "2026-09-30", base: "EUR", quote: "HUF", rate: 390.25 },
+      { date: "2026-09-30", base: "EUR", quote: "USD", rate: 2.17 },
+      { date: "2026-09-30", base: "EUR", quote: "GBP", rate: 3.17 },
+    ]);
+  });
+
   it("converts an amount with stable decimal rounding", async () => {
     const response = await app.inject({
       method: "GET",
@@ -122,6 +150,15 @@ describe("currency API", () => {
     expect(response.json().error.code).toBe("INVALID_REQUEST");
   });
 
+  it("rejects malformed bulk quote lists", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/rates?base=EUR&quotes=HUF,US-D",
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("INVALID_REQUEST");
+  });
+
   it("rejects disallowed browser origins without leaking internals", async () => {
     const response = await app.inject({
       method: "GET",
@@ -136,6 +173,9 @@ describe("currency API", () => {
   it("maps upstream timeouts to a traceable 504", async () => {
     const failingProvider: CurrencyProvider = {
       async getRate() {
+        throw new CurrencyProviderError(504, "Az árfolyam-szolgáltató nem válaszolt időben.");
+      },
+      async getRates() {
         throw new CurrencyProviderError(504, "Az árfolyam-szolgáltató nem válaszolt időben.");
       },
       async getCurrencies() {

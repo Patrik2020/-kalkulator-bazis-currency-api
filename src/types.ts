@@ -21,7 +21,15 @@ export type RateRequest = {
   provider?: string;
 };
 
+export type RatesRequest = {
+  base: string;
+  quotes: string[];
+  date?: string;
+  provider?: string;
+};
+
 export interface CurrencyProvider {
   getRate(input: RateRequest): Promise<CurrencyRate>;
+  getRates(input: RatesRequest): Promise<CurrencyRate[]>;
   getCurrencies(input?: { provider?: string }): Promise<CurrencyInfo[]>;
 }
