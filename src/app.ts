@@ -29,6 +29,13 @@ type RateQuery = {
   provider?: string;
 };
 
+type RatesQuery = {
+  base: string;
+  quotes: string;
+  date?: string;
+  provider?: string;
+};
+
 type ConvertQuery = RateQuery & {
   amount: number;
 };
@@ -67,6 +74,23 @@ const rateQuerySchema = {
   },
 } as const;
 
+const ratesQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["base", "quotes"],
+  properties: {
+    base: currencyCode,
+    quotes: {
+      type: "string",
+      pattern: "^[A-Za-z]{3}(,[A-Za-z]{3}){0,49}$",
+      maxLength: 199,
+      description: "Vesszővel elválasztott cél-devizák, például HUF,USD,GBP.",
+    },
+    date,
+    provider: providerCode,
+  },
+} as const;
+
 const convertQuerySchema = {
   type: "object",
   additionalProperties: false,
@@ -87,6 +111,10 @@ const convertQuerySchema = {
 
 function normalizeCurrency(value: string): string {
   return value.toUpperCase();
+}
+
+function normalizeQuotes(value: string): string[] {
+  return [...new Set(value.split(",").map(normalizeCurrency))];
 }
 
 function normalizeProvider(value: string | undefined): string | undefined {
@@ -231,7 +259,12 @@ export async function buildApp(options: BuildAppOptions = {}) {
   }, () => ({
     name: SERVICE_NAME,
     version: VERSION,
-    endpoints: ["/api/v1/rate", "/api/v1/convert", "/api/v1/currencies"],
+    endpoints: [
+      "/api/v1/rate",
+      "/api/v1/rates",
+      "/api/v1/convert",
+      "/api/v1/currencies",
+    ],
     source: "Frankfurter v2",
   }));
 
@@ -258,6 +291,50 @@ export async function buildApp(options: BuildAppOptions = {}) {
       return {
         data: rate,
         meta: {
+          source: "Frankfurter v2",
+          provider: selectedProvider ?? "blended",
+          fetchedAt: new Date().toISOString(),
+        },
+      };
+    },
+  );
+
+  app.get<{ Querystring: RatesQuery }>(
+    "/api/v1/rates",
+    {
+      schema: {
+        tags: ["currency"],
+        summary: "Több cél-deviza árfolyama egy kérésben",
+        querystring: ratesQuerySchema,
+      },
+    },
+    async (request) => {
+      const base = normalizeCurrency(request.query.base);
+      const quotes = normalizeQuotes(request.query.quotes).filter((quote) => quote !== base);
+      const selectedProvider = normalizeProvider(request.query.provider);
+      if (quotes.length === 0) {
+        return {
+          data: [],
+          meta: {
+            count: 0,
+            source: "Frankfurter v2",
+            provider: selectedProvider ?? "blended",
+            fetchedAt: new Date().toISOString(),
+          },
+        };
+      }
+
+      const rates = await provider.getRates({
+        base,
+        quotes,
+        ...(request.query.date ? { date: request.query.date } : {}),
+        ...(selectedProvider ? { provider: selectedProvider } : {}),
+      });
+
+      return {
+        data: rates,
+        meta: {
+          count: rates.length,
           source: "Frankfurter v2",
           provider: selectedProvider ?? "blended",
           fetchedAt: new Date().toISOString(),
