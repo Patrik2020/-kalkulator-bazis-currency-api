@@ -23,6 +23,7 @@ Az API ugyanakkor **nem saját maga állít elő piaci vagy jegybanki árfolyamo
 - upstream timeout, válaszvalidáció és szanitizált hibakezelés
 - opcionális Swagger/OpenAPI dokumentáció
 - automatizált API-tesztek, npm audit, Dependabot és CodeQL
+- automatikus production smoke ellenőrzés a publikus API biztonsági alapállapotára
 
 ## Végpontok
 
@@ -121,7 +122,7 @@ Ilyenkor a Swagger UI nincs publikusan kiszolgálva, és a Helmet alapértelmeze
 
 ## Helyi futtatás
 
-Node.js 22 vagy újabb szükséges.
+A projekt runtime-ja a gyökérben lévő `.node-version` fájlban van rögzítve. Jelenleg Node.js `22.23.3` LTS-t használunk, és ugyanezt a verziót használja a CI és a production környezet is.
 
 ```bash
 npm ci
@@ -163,6 +164,7 @@ npm start
 
 ```text
 NODE_ENV=production
+NODE_VERSION=22.23.3
 DOCS_ENABLED=false
 TRUST_PROXY=true
 CORS_ORIGINS=https://kalkulatorbazis.hu,https://www.kalkulatorbazis.hu
@@ -177,6 +179,8 @@ Az API szándékosan **publikus és read-only**. A CORS böngészőbiztonsági s
 Ha később fizetős vagy ügyfelenként kvótázott API készül, külön API-key/auth réteg és ügyfelenkénti usage-mérés szükséges. A weboldal JavaScriptjébe tett API-kulcs nem lenne titok, ezért az nem megfelelő védelem.
 
 A dependency-fa `package-lock.json` fájlban rögzített. A CI `npm ci`-t használ, high vagy critical npm audit találatnál hibával leáll. A Dependabot és a CodeQL további automatikus ellenőrzést ad.
+
+A `Production Smoke` workflow `main` push után, illetve kézzel is futtatható. Ellenőrzi a production health végpontot, a bulk árfolyam végpontot, az engedélyezett és tiltott CORS origint, a fontos Helmet security headereket, valamint azt, hogy productionben a `/docs` ne legyen publikus.
 
 Lásd még: [`SECURITY.md`](SECURITY.md).
 
