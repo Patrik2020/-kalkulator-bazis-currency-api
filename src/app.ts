@@ -20,6 +20,7 @@ export type BuildAppOptions = {
   corsOrigins?: readonly string[];
   rateLimitMax?: number;
   docsEnabled?: boolean;
+  trustProxy?: boolean;
 };
 
 type RateQuery = {
@@ -59,7 +60,7 @@ const date = {
 const providerCode = {
   type: "string",
   pattern: "^[A-Za-z0-9_-]{2,20}$",
-  description: "Opcionális Frankfurter forráskulcs, például ECB.",
+  description: "Opcionális árfolyamforrás-kulcs, például ECB.",
 } as const;
 
 const rateQuerySchema = {
@@ -141,6 +142,14 @@ function providerErrorCode(status: number): string {
   return "UPSTREAM_UNAVAILABLE";
 }
 
+function providerPublicMessage(status: number): string {
+  if (status === 404) return "A kért árfolyam nem található.";
+  if (status === 400) return "Az árfolyamforrás nem fogadta el a kérést.";
+  if (status === 502) return "Az árfolyamforrás érvénytelen választ adott.";
+  if (status === 504) return "Az árfolyamforrás nem válaszolt időben.";
+  return "Az árfolyamforrás átmenetileg nem érhető el.";
+}
+
 export async function buildApp(options: BuildAppOptions = {}) {
   const provider = options.provider ?? new FrankfurterClient({
     baseUrl: process.env.FRANKFURTER_BASE_URL,
@@ -152,10 +161,12 @@ export async function buildApp(options: BuildAppOptions = {}) {
   ));
   const docsEnabled = options.docsEnabled ?? process.env.DOCS_ENABLED !== "false";
   const maxRequests = options.rateLimitMax ?? (Number(process.env.RATE_LIMIT_MAX) || 120);
+  const trustProxy = options.trustProxy ?? process.env.TRUST_PROXY === "true";
 
   const app = Fastify({
     logger: process.env.NODE_ENV !== "test",
     bodyLimit: 65_536,
+    trustProxy,
   });
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
@@ -167,7 +178,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       return reply.status(status).send({
         error: {
           code: providerErrorCode(status),
-          message: error.message,
+          message: providerPublicMessage(status),
           requestId: request.id,
         },
       });
@@ -200,7 +211,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     });
   });
 
-  await app.register(helmet, { contentSecurityPolicy: false });
+  await app.register(helmet, docsEnabled ? { contentSecurityPolicy: false } : {});
   await app.register(cors, {
     strictPreflight: true,
     origin(origin, callback) {
@@ -208,13 +219,17 @@ export async function buildApp(options: BuildAppOptions = {}) {
       else callback(new Error("Origin not allowed"), false);
     },
   });
-  await app.register(rateLimit, { max: maxRequests, timeWindow: "1 minute" });
+  await app.register(rateLimit, {
+    max: maxRequests,
+    timeWindow: "1 minute",
+    keyGenerator: (request) => request.ip,
+  });
   await app.register(swagger, {
     openapi: {
       info: {
         title: "Kalkulátor Bázis Currency API",
         version: VERSION,
-        description: "Devizaárfolyam- és devizaváltó API Frankfurter v2 adatokra építve.",
+        description: "Devizaárfolyam- és devizaváltó API normalizált külső referenciaárfolyam-adatokkal.",
       },
       tags: [
         { name: "system", description: "Rendszerállapot" },
@@ -265,7 +280,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       "/api/v1/convert",
       "/api/v1/currencies",
     ],
-    source: "Frankfurter v2",
+    source: "external reference rates",
   }));
 
   app.get<{ Querystring: RateQuery }>(
@@ -291,7 +306,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       return {
         data: rate,
         meta: {
-          source: "Frankfurter v2",
+          source: "external reference rates",
           provider: selectedProvider ?? "blended",
           fetchedAt: new Date().toISOString(),
         },
@@ -317,7 +332,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           data: [],
           meta: {
             count: 0,
-            source: "Frankfurter v2",
+            source: "external reference rates",
             provider: selectedProvider ?? "blended",
             fetchedAt: new Date().toISOString(),
           },
@@ -335,7 +350,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
         data: rates,
         meta: {
           count: rates.length,
-          source: "Frankfurter v2",
+          source: "external reference rates",
           provider: selectedProvider ?? "blended",
           fetchedAt: new Date().toISOString(),
         },
@@ -374,7 +389,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           rateDate: rate.date,
         },
         meta: {
-          source: "Frankfurter v2",
+          source: "external reference rates",
           provider: selectedProvider ?? "blended",
           fetchedAt: new Date().toISOString(),
           disclaimer: "Referenciaárfolyam-alapú tájékoztató átváltás; banki és készpénzes árfolyam eltérhet.",
@@ -405,7 +420,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
         data: currencies,
         meta: {
           count: currencies.length,
-          source: "Frankfurter v2",
+          source: "external reference rates",
           provider: selectedProvider ?? "all",
           fetchedAt: new Date().toISOString(),
         },

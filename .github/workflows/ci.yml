@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - "feat/**"
+      - "security/**"
   pull_request:
 
 permissions:
@@ -22,9 +23,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
 
       - name: Typecheck
         run: npm run typecheck
