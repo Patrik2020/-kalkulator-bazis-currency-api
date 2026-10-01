@@ -85,7 +85,7 @@ describe("currency API", () => {
         rate: 390.25,
       },
       meta: {
-        source: "Frankfurter v2",
+        source: "external reference rates",
         provider: "ECB",
       },
     });
@@ -101,7 +101,7 @@ describe("currency API", () => {
     const body = response.json();
     expect(body.meta).toMatchObject({
       count: 3,
-      source: "Frankfurter v2",
+      source: "external reference rates",
       provider: "ECB",
     });
     expect(body.data).toEqual([
@@ -128,7 +128,7 @@ describe("currency API", () => {
         rateDate: "2026-09-30",
       },
       meta: {
-        source: "Frankfurter v2",
+        source: "external reference rates",
         provider: "blended",
       },
     });
@@ -170,13 +170,13 @@ describe("currency API", () => {
     expect(JSON.stringify(response.json())).not.toContain("Origin not allowed");
   });
 
-  it("maps upstream timeouts to a traceable 504", async () => {
+  it("maps upstream timeouts to a traceable sanitized 504", async () => {
     const failingProvider: CurrencyProvider = {
       async getRate() {
-        throw new CurrencyProviderError(504, "Az árfolyam-szolgáltató nem válaszolt időben.");
+        throw new CurrencyProviderError(504, "SECRET upstream diagnostic that must not leak");
       },
       async getRates() {
-        throw new CurrencyProviderError(504, "Az árfolyam-szolgáltató nem válaszolt időben.");
+        throw new CurrencyProviderError(504, "SECRET upstream diagnostic that must not leak");
       },
       async getCurrencies() {
         return [];
@@ -193,8 +193,49 @@ describe("currency API", () => {
       expect(response.statusCode).toBe(504);
       expect(response.json().error.code).toBe("UPSTREAM_TIMEOUT");
       expect(response.json().error.requestId).toBe(response.headers["x-request-id"]);
+      expect(JSON.stringify(response.json())).not.toContain("SECRET upstream diagnostic");
     } finally {
       await failingApp.close();
     }
+  });
+
+  it("uses the trusted forwarded client IP for rate limiting behind Render", async () => {
+    const proxyApp = await buildApp({
+      provider,
+      docsEnabled: false,
+      trustProxy: true,
+      rateLimitMax: 1,
+    });
+    await proxyApp.ready();
+
+    try {
+      const firstClient = await proxyApp.inject({
+        method: "GET",
+        url: "/api/v1/rate?from=EUR&to=HUF",
+        headers: { "x-forwarded-for": "203.0.113.10" },
+      });
+      const secondClient = await proxyApp.inject({
+        method: "GET",
+        url: "/api/v1/rate?from=EUR&to=HUF",
+        headers: { "x-forwarded-for": "203.0.113.11" },
+      });
+      const firstClientAgain = await proxyApp.inject({
+        method: "GET",
+        url: "/api/v1/rate?from=EUR&to=HUF",
+        headers: { "x-forwarded-for": "203.0.113.10" },
+      });
+
+      expect(firstClient.statusCode).toBe(200);
+      expect(secondClient.statusCode).toBe(200);
+      expect(firstClientAgain.statusCode).toBe(429);
+      expect(firstClientAgain.json().error.code).toBe("RATE_LIMITED");
+    } finally {
+      await proxyApp.close();
+    }
+  });
+
+  it("does not expose Swagger UI when documentation is disabled", async () => {
+    const response = await app.inject({ method: "GET", url: "/docs" });
+    expect(response.statusCode).toBe(404);
   });
 });
