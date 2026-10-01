@@ -1,0 +1,74 @@
+name: Production Smoke
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: currency-api-production-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      API_BASE: https://kalkulator-bazis-currency-api.onrender.com
+    steps:
+      - name: Wait for healthy production with docs disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=0
+          for attempt in $(seq 1 30); do
+            health_status="$(curl -sS --max-time 20 -o /tmp/health.json -w '%{http_code}' "$API_BASE/health" || true)"
+            docs_status="$(curl -sS --max-time 20 -o /tmp/docs.txt -w '%{http_code}' "$API_BASE/docs" || true)"
+            if [[ "$health_status" == "200" && "$docs_status" == "404" ]]; then
+              ready=1
+              break
+            fi
+            echo "Production not ready yet (attempt $attempt/30, health=$health_status, docs=$docs_status)"
+            sleep 10
+          done
+          if [[ "$ready" != "1" ]]; then
+            echo "Production did not reach the expected hardened state in time"
+            exit 1
+          fi
+          node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync("/tmp/health.json","utf8")); if(x.status!=="ok") process.exit(1);'
+
+      - name: Verify bulk rates and allowed CORS origin
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(curl -sS --max-time 20 -D /tmp/allowed-headers.txt -o /tmp/rates.json -w '%{http_code}' \
+            -H 'Origin: https://kalkulatorbazis.hu' \
+            "$API_BASE/api/v1/rates?base=EUR&quotes=HUF,USD,GBP")"
+          test "$status" = "200"
+          grep -Fqi 'access-control-allow-origin: https://kalkulatorbazis.hu' /tmp/allowed-headers.txt
+          node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync("/tmp/rates.json","utf8")); if(!Array.isArray(x.data)||x.data.length!==3) process.exit(1);'
+
+      - name: Verify disallowed browser origin is rejected
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(curl -sS --max-time 20 -o /tmp/denied.json -w '%{http_code}' \
+            -H 'Origin: https://evil.example' \
+            "$API_BASE/api/v1/rate?from=EUR&to=HUF" || true)"
+          test "$status" = "403"
+          node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync("/tmp/denied.json","utf8")); if(x?.error?.code!=="CORS_ORIGIN_DENIED") process.exit(1);'
+
+      - name: Verify production security headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(curl -sS --max-time 20 -D /tmp/root-headers.txt -o /tmp/root.json -w '%{http_code}' "$API_BASE/")"
+          test "$status" = "200"
+          grep -Eqi '^content-security-policy:' /tmp/root-headers.txt
+          grep -Eqi '^x-content-type-options:[[:space:]]*nosniff' /tmp/root-headers.txt
+          grep -Eqi '^x-frame-options:' /tmp/root-headers.txt
+          node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync("/tmp/root.json","utf8")); if(x.name!=="kalkulator-bazis-currency-api") process.exit(1);'
