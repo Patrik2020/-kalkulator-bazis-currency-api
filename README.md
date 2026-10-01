@@ -1,139 +1,126 @@
 # Kalkulátor Bázis Currency API
 
-Önálló, TypeScript + Fastify alapú devizaárfolyam- és devizaváltó backend a Kalkulátor Bázishoz.
+Saját, TypeScript + Fastify alapú devizaárfolyam- és devizaváltó backend a Kalkulátor Bázishoz.
 
-## Mit jelent itt az, hogy önálló?
+## Currency Engine v2
 
-Az API **önálló szolgáltatás**: saját domain/URL, saját végpontok, saját validáció, rate limit, hibakezelés, tesztek és deploy tartozik hozzá. A weboldal a Kalkulátor Bázis API-szerződéséhez kapcsolódik, ezért az alatta lévő árfolyamforrás később cserélhető anélkül, hogy a frontend API-hívásait újra kellene tervezni.
+A `0.2.0` verziótól az API már nem a Frankfurter kliensére épül. A saját `CurrencyEngine` dönti el, melyik forrást használja, normalizálja az adatokat, keresztárfolyamot számol, cache-el és fallbackel.
 
-Az API ugyanakkor **nem saját maga állít elő piaci vagy jegybanki árfolyamot**. A jelenlegi upstream adatforrás a Frankfurter v2 API. Alapértelmezésben annak összesített referenciaárfolyamát használja, a `provider` paraméterrel pedig konkrét forrás – például `ECB` – kérhető. Az upstream választ az API validálja és normalizálja; nem vakon továbbítja.
+Forrásprioritás aktuális árfolyamhoz:
+
+1. `LIVE` – közel valós idejű piaci quote feed, ha a szerveren van érvényes live API-kulcs.
+2. `LIVE_CACHE` – utolsó jó élő ár, rövid ideig használható feed-kieséskor.
+3. `MNB` – a Magyar Nemzeti Bank hivatalos napi referenciaárfolyamai.
+4. `ECB` – az Európai Központi Bank hivatalos napi referenciaárfolyamai.
+5. `LAST_KNOWN_GOOD` – folyamaton belüli utolsó jó referenciaadat, korlátozott ideig.
+
+Historikus dátumnál az API hivatalos referenciaforrást használ.
+
+A frontend kizárólag a Kalkulátor Bázis API-ját hívja. A live feed adapter később cserélhető anélkül, hogy a weboldali API-szerződés változna.
+
+## Mit jelent itt a „saját” árfolyam-motor?
+
+A szolgáltatás, az API-szerződés, a forrásválasztás, a cross-rate logika, a cache, a fallback, a validáció, a hibakezelés és a deploy a Kalkulátor Bázisé.
+
+A valós piaci árfolyam maga külső market-data feedből érkezik: ilyen adatot nem lehet hitelesen „kiszámolni” külső piaci információ nélkül. A motor ezért provider-független réteget használ, és nem köti a frontendet egyetlen adatszolgáltatóhoz.
+
+## Live market feed
+
+A jelenlegi live adapter a TradingView Data API harmadik féltől származó szolgáltatására van felkészítve. Ez nem a TradingView, Inc. hivatalos API-ja. A provider dokumentációja szerint a saját alkalmazásban történő megjelenítés, cache-elés és továbbítás engedélyezett a szolgáltatási feltételek és az előfizetési limit keretei között; production használat előtt a licencet és az aktuális feltételeket újra ellenőrizni kell.
+
+A live adapter legfeljebb 10 devizapárt kér egyszerre batch-ben, a quote-okat rövid ideig szerveroldalon cache-eli, bid/ask esetén középárfolyamot számol, és szükség esetén inverz vagy USD-n keresztüli keresztárfolyamot képez.
+
+Live feed nélkül az API továbbra is működik MNB/ECB referenciaadatokkal.
 
 ## Funkciók
 
 - aktuális devizapár-árfolyam
 - több cél-deviza egyetlen kérésben
-- historikus árfolyam dátum alapján
+- közel valós idejű piaci árfolyam live feed esetén
+- MNB + ECB hivatalos fallback
+- inverz és USD-alapú cross-rate számítás
+- historikus referenciaárfolyam
 - konkrét összeg átváltása
 - támogatott devizák listázása
-- opcionális provider-szűrés
+- utolsó ismert jó ár rövid idejű fallbackként
 - JSON Schema validáció
 - szűk böngészős CORS allowlist
 - kliens-IP alapú rate limit
 - request ID minden válaszban
-- upstream timeout, válaszvalidáció és szanitizált hibakezelés
+- szanitizált hibakezelés
 - opcionális Swagger/OpenAPI dokumentáció
-- automatizált API-tesztek, npm audit, Dependabot és CodeQL
-- automatikus production smoke ellenőrzés a publikus API biztonsági alapállapotára
+- npm audit, Dependabot, CodeQL és production smoke
 
 ## Végpontok
 
-### Állapot
-
 ```http
 GET /health
-```
-
-### API információ
-
-```http
 GET /api/v1
-```
-
-### Devizapár árfolyama
-
-```http
 GET /api/v1/rate?from=EUR&to=HUF
+GET /api/v1/rates?base=EUR&quotes=HUF,USD,GBP
+GET /api/v1/convert?amount=100&from=EUR&to=HUF
+GET /api/v1/currencies
 ```
 
-Historikus árfolyam:
+Opcionális forráskényszerítés:
 
 ```http
-GET /api/v1/rate?from=EUR&to=HUF&date=2026-09-01
-```
-
-Konkrét forrás, például ECB:
-
-```http
+GET /api/v1/rate?from=EUR&to=HUF&provider=LIVE
+GET /api/v1/rate?from=EUR&to=HUF&provider=MNB
 GET /api/v1/rate?from=EUR&to=HUF&provider=ECB
 ```
 
-### Több árfolyam egy kérésben
-
-```http
-GET /api/v1/rates?base=EUR&quotes=HUF,USD,GBP
-```
-
-Legfeljebb 50 cél-deviza kérhető egy hívásban.
-
-### Deviza átváltása
-
-```http
-GET /api/v1/convert?amount=100&from=EUR&to=HUF
-```
+Alapértelmezésben `AUTO` módban a motor választ.
 
 Példa válasz:
 
 ```json
 {
   "data": {
-    "amount": 100,
-    "from": "EUR",
-    "to": "HUF",
-    "rate": 390.25,
-    "convertedAmount": 39025,
-    "rateDate": "2026-09-30"
+    "date": "2026-10-01",
+    "base": "EUR",
+    "quote": "HUF",
+    "rate": 367.21,
+    "timestamp": "2026-10-01T04:15:22.000Z",
+    "status": "live",
+    "provider": "LIVE"
   },
   "meta": {
-    "source": "external reference rates",
-    "provider": "blended",
-    "fetchedAt": "2026-09-30T14:30:00.000Z",
-    "disclaimer": "Referenciaárfolyam-alapú tájékoztató átváltás; banki és készpénzes árfolyam eltérhet."
+    "source": "Kalkulátor Bázis Currency Engine",
+    "provider": "LIVE",
+    "status": "live",
+    "rateTimestamp": "2026-10-01T04:15:22.000Z",
+    "fetchedAt": "2026-10-01T04:15:24.000Z"
   }
 }
 ```
 
-### Támogatott devizák
+## Környezeti változók
 
-```http
-GET /api/v1/currencies
-```
-
-Providerre szűrve:
-
-```http
-GET /api/v1/currencies?provider=ECB
-```
-
-## Swagger
-
-Fejlesztői környezetben használható:
-
-```text
-/docs
-```
-
-Productionben ajánlott:
-
-```text
-DOCS_ENABLED=false
-```
-
-Ilyenkor a Swagger UI nincs publikusan kiszolgálva, és a Helmet alapértelmezett CSP-je is aktív marad.
+| Változó | Alapérték | Leírás |
+| --- | --- | --- |
+| `TRADINGVIEW_API_KEY` | nincs | Opcionális live market-data API-kulcs |
+| `TRADINGVIEW_BASE_URL` | `https://api.tradingviewapi.com` | Live adapter API címe |
+| `TRADINGVIEW_FX_EXCHANGES` | `FOREXCOM,FX_IDC` | Sorban próbált FX venue-k |
+| `TRADINGVIEW_TIMEOUT_MS` | `5000` | Live feed timeout |
+| `LIVE_RATE_CACHE_MS` | `60000` | Élő quote cache ideje |
+| `LIVE_STALE_MAX_MS` | `900000` | Legfeljebb meddig használható korábbi élő quote feed-kieséskor |
+| `MNB_BASE_URL` | `https://www.mnb.hu/arfolyamok.asmx` | MNB SOAP webservice |
+| `MNB_TIMEOUT_MS` | `5000` | MNB timeout |
+| `ECB_BASE_URL` | `https://data-api.ecb.europa.eu/service` | ECB Data API |
+| `ECB_TIMEOUT_MS` | `5000` | ECB timeout |
+| `REFERENCE_STALE_MAX_MS` | `172800000` | Utolsó jó referenciaadat maximális kora |
+| `CORS_ORIGINS` | Kalkulátor Bázis + localhost | Böngészős allowlist |
+| `RATE_LIMIT_MAX` | `120` | Kérések percenként/IP |
+| `DOCS_ENABLED` | `true` | Swagger UI |
+| `TRUST_PROXY` | `false` | Reverse proxy mögötti kliens-IP használata |
 
 ## Helyi futtatás
-
-A projekt runtime-ja a gyökérben lévő `.node-version` fájlban van rögzítve. Jelenleg Node.js `22.23.3` LTS-t használunk, és ugyanezt a verziót használja a CI és a production környezet is.
 
 ```bash
 npm ci
 cp .env.example .env
 npm run dev
-```
-
-Alapértelmezett cím:
-
-```text
-http://localhost:3000
 ```
 
 ## Build és ellenőrzés
@@ -144,23 +131,11 @@ npm audit --audit-level=high
 npm run typecheck
 npm test
 npm run build
-npm start
 ```
 
-## Környezeti változók
+## Production
 
-| Változó | Alapérték | Leírás |
-| --- | --- | --- |
-| `PORT` | `3000` | HTTP port |
-| `HOST` | `0.0.0.0` | Listen host |
-| `CORS_ORIGINS` | Kalkulátor Bázis + localhost | Engedélyezett böngészős origin lista, vesszővel elválasztva |
-| `FRANKFURTER_BASE_URL` | `https://api.frankfurter.dev/v2` | Jelenlegi upstream API |
-| `FRANKFURTER_TIMEOUT_MS` | `5000` | Upstream timeout ms |
-| `RATE_LIMIT_MAX` | `120` | Maximális kérésszám percenként/IP |
-| `DOCS_ENABLED` | `true` | Swagger UI engedélyezése |
-| `TRUST_PROXY` | `false` | Megbízható reverse proxy mögött a továbbított kliens-IP használata |
-
-### Render production javaslat
+Javasolt Render beállítások:
 
 ```text
 NODE_ENV=production
@@ -170,26 +145,16 @@ TRUST_PROXY=true
 CORS_ORIGINS=https://kalkulatorbazis.hu,https://www.kalkulatorbazis.hu
 ```
 
-A `TRUST_PROXY=true` értéket csak olyan környezetben szabad használni, ahol a szolgáltatás közvetlenül nem kerülhető meg, és a reverse proxy által beállított forwarded headerek megbízhatók.
+Live aktiváláskor ezen felül a `TRADINGVIEW_API_KEY` szükséges. A kulcs kizárólag szerveroldali secret legyen; frontend JavaScriptbe nem kerülhet.
 
-## Biztonsági modell
+## Biztonság
 
-Az API szándékosan **publikus és read-only**. A CORS böngészőbiztonsági szabály, nem hitelesítés: curlből, szerverről vagy más nem böngészős kliensből az API címe közvetlenül hívható. Ezt rate limit és bemenetvalidáció védi.
+Az API read-only. A dependency-fa lockolt, a CI `npm ci`-t és `npm audit --audit-level=high` ellenőrzést futtat, a CodeQL statikus elemzést végez, a GitHub Actions actionök immutable SHA-ra vannak pinelve, a production smoke pedig ellenőrzi az éles health, árfolyam, CORS, security header és `/docs` állapotot.
 
-Ha később fizetős vagy ügyfelenként kvótázott API készül, külön API-key/auth réteg és ügyfelenkénti usage-mérés szükséges. A weboldal JavaScriptjébe tett API-kulcs nem lenne titok, ezért az nem megfelelő védelem.
+## Pontosság
 
-A dependency-fa `package-lock.json` fájlban rögzített. A CI `npm ci`-t használ, high vagy critical npm audit találatnál hibával leáll. A Dependabot és a CodeQL további automatikus ellenőrzést ad.
-
-A `Production Smoke` workflow `main` push után, illetve kézzel is futtatható. Ellenőrzi a production health végpontot, a bulk árfolyam végpontot, az engedélyezett és tiltott CORS origint, a fontos Helmet security headereket, valamint azt, hogy productionben a `/docs` ne legyen publikus.
-
-Lásd még: [`SECURITY.md`](SECURITY.md).
-
-## Adatforrás és pontosság
-
-A jelenlegi upstream a Frankfurter v2, amely különböző jegybanki és hivatalos forrásokból származó referenciaárfolyamokat tesz elérhetővé. Provider megadása nélkül összesített árfolyamot ad; `provider=ECB` esetén az ECB-adatokra lehet szűrni.
-
-Az API eredménye tájékoztató jellegű. Nem banki vételi/eladási, nem készpénzes és nem kártyatársasági elszámolási árfolyam.
+A `live` státusz piaci quote-ból képzett tájékoztató középárfolyamot jelent. A `reference` státusz MNB/ECB hivatalos napi referenciaárfolyamot jelent. Egyik sem garantálja egy bank, pénzváltó vagy kártyatársaság tényleges vételi/eladási/elszámolási árfolyamát.
 
 ## Verzió
 
-Első API-verzió: `0.1.0`.
+Aktuális API-verzió: `0.2.0`.
