@@ -20,7 +20,7 @@ jobs:
     env:
       API_BASE: https://kalkulator-bazis-currency-api.onrender.com
     steps:
-      - name: Wait for healthy production with docs disabled
+      - name: Wait for Currency Engine v2 production with docs disabled
         shell: bash
         run: |
           set -euo pipefail
@@ -28,20 +28,25 @@ jobs:
           for attempt in $(seq 1 30); do
             health_status="$(curl -sS --max-time 20 -o /tmp/health.json -w '%{http_code}' "$API_BASE/health" || true)"
             docs_status="$(curl -sS --max-time 20 -o /tmp/docs.txt -w '%{http_code}' "$API_BASE/docs" || true)"
-            if [[ "$health_status" == "200" && "$docs_status" == "404" ]]; then
+            engine_ready=0
+            if [[ "$health_status" == "200" ]]; then
+              if node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync("/tmp/health.json","utf8")); if(x.status!=="ok"||x.engine!=="currency-engine-v2"||x.version!=="0.2.0") process.exit(1);'; then
+                engine_ready=1
+              fi
+            fi
+            if [[ "$health_status" == "200" && "$docs_status" == "404" && "$engine_ready" == "1" ]]; then
               ready=1
               break
             fi
-            echo "Production not ready yet (attempt $attempt/30, health=$health_status, docs=$docs_status)"
+            echo "Production v2 not ready yet (attempt $attempt/30, health=$health_status, docs=$docs_status, engine_ready=$engine_ready)"
             sleep 10
           done
           if [[ "$ready" != "1" ]]; then
-            echo "Production did not reach the expected hardened state in time"
+            echo "Production did not reach the expected Currency Engine v2 hardened state in time"
             exit 1
           fi
-          node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync("/tmp/health.json","utf8")); if(x.status!=="ok") process.exit(1);'
 
-      - name: Verify bulk rates and allowed CORS origin
+      - name: Verify v2 bulk rates and allowed CORS origin
         shell: bash
         run: |
           set -euo pipefail
@@ -50,7 +55,7 @@ jobs:
             "$API_BASE/api/v1/rates?base=EUR&quotes=HUF,USD,GBP")"
           test "$status" = "200"
           grep -Fqi 'access-control-allow-origin: https://kalkulatorbazis.hu' /tmp/allowed-headers.txt
-          node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync("/tmp/rates.json","utf8")); if(!Array.isArray(x.data)||x.data.length!==3) process.exit(1);'
+          node -e 'const fs=require("fs"); const raw=fs.readFileSync("/tmp/rates.json","utf8"); const x=JSON.parse(raw); if(!Array.isArray(x.data)||x.data.length!==3) process.exit(1); if(x?.meta?.source!=="Kalkulátor Bázis Currency Engine") process.exit(1); if(!["live","reference","cached","mixed"].includes(x?.meta?.status)) process.exit(1); if(/frankfurter/i.test(raw)) process.exit(1);'
 
       - name: Verify disallowed browser origin is rejected
         shell: bash
@@ -71,4 +76,4 @@ jobs:
           grep -Eqi '^content-security-policy:' /tmp/root-headers.txt
           grep -Eqi '^x-content-type-options:[[:space:]]*nosniff' /tmp/root-headers.txt
           grep -Eqi '^x-frame-options:' /tmp/root-headers.txt
-          node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync("/tmp/root.json","utf8")); if(x.name!=="kalkulator-bazis-currency-api") process.exit(1);'
+          node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync("/tmp/root.json","utf8")); if(x.name!=="kalkulator-bazis-currency-api"||x.version!=="0.2.0") process.exit(1);'

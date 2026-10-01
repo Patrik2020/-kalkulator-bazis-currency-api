@@ -1,16 +1,21 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/app.js";
-import { CurrencyProviderError } from "../src/frankfurter.js";
+import { CurrencyProviderError } from "../src/errors.js";
 import type { CurrencyProvider } from "../src/types.js";
 
 const provider: CurrencyProvider = {
+  id: "TEST",
+  kind: "live",
   async getRate(input) {
     return {
       date: input.date ?? "2026-09-30",
       base: input.from.toUpperCase(),
       quote: input.to.toUpperCase(),
       rate: 390.25,
+      timestamp: "2026-09-30T12:00:00.000Z",
+      status: "live",
+      provider: "TEST",
     };
   },
   async getRates(input) {
@@ -19,6 +24,9 @@ const provider: CurrencyProvider = {
       base: input.base.toUpperCase(),
       quote: quote.toUpperCase(),
       rate: index === 0 ? 390.25 : 1.17 + index,
+      timestamp: "2026-09-30T12:00:00.000Z",
+      status: "live" as const,
+      provider: "TEST",
     }));
   },
   async getCurrencies() {
@@ -28,16 +36,12 @@ const provider: CurrencyProvider = {
         iso_numeric: "978",
         name: "Euro",
         symbol: "€",
-        start_date: "1999-01-04",
-        end_date: "2026-09-30",
       },
       {
         iso_code: "HUF",
         iso_numeric: "348",
         name: "Hungarian Forint",
         symbol: "Ft",
-        start_date: "1999-01-04",
-        end_date: "2026-09-30",
       },
     ];
   },
@@ -59,18 +63,19 @@ afterAll(async () => {
 });
 
 describe("currency API", () => {
-  it("reports health and request id", async () => {
+  it("reports Currency Engine v2 health and request id", async () => {
     const response = await app.inject({ method: "GET", url: "/health" });
     expect(response.statusCode).toBe(200);
     expect(response.headers["x-request-id"]).toBeTruthy();
     expect(response.json()).toMatchObject({
       status: "ok",
       service: "kalkulator-bazis-currency-api",
-      version: "0.1.0",
+      version: "0.2.0",
+      engine: "currency-engine-v2",
     });
   });
 
-  it("returns a normalized pair rate", async () => {
+  it("returns a normalized pair rate with engine metadata", async () => {
     const response = await app.inject({
       method: "GET",
       url: "/api/v1/rate?from=eur&to=huf&provider=ecb",
@@ -83,10 +88,12 @@ describe("currency API", () => {
         base: "EUR",
         quote: "HUF",
         rate: 390.25,
+        status: "live",
       },
       meta: {
-        source: "external reference rates",
+        source: "Kalkulátor Bázis Currency Engine",
         provider: "ECB",
+        status: "live",
       },
     });
   });
@@ -101,13 +108,18 @@ describe("currency API", () => {
     const body = response.json();
     expect(body.meta).toMatchObject({
       count: 3,
-      source: "external reference rates",
+      source: "Kalkulátor Bázis Currency Engine",
       provider: "ECB",
+      status: "live",
     });
-    expect(body.data).toEqual([
-      { date: "2026-09-30", base: "EUR", quote: "HUF", rate: 390.25 },
-      { date: "2026-09-30", base: "EUR", quote: "USD", rate: 2.17 },
-      { date: "2026-09-30", base: "EUR", quote: "GBP", rate: 3.17 },
+    expect(body.data.map((rate: { base: string; quote: string; rate: number }) => ({
+      base: rate.base,
+      quote: rate.quote,
+      rate: rate.rate,
+    }))).toEqual([
+      { base: "EUR", quote: "HUF", rate: 390.25 },
+      { base: "EUR", quote: "USD", rate: 2.17 },
+      { base: "EUR", quote: "GBP", rate: 3.17 },
     ]);
   });
 
@@ -126,10 +138,12 @@ describe("currency API", () => {
         rate: 390.25,
         convertedAmount: 3902.5,
         rateDate: "2026-09-30",
+        rateTimestamp: "2026-09-30T12:00:00.000Z",
       },
       meta: {
-        source: "external reference rates",
-        provider: "blended",
+        source: "Kalkulátor Bázis Currency Engine",
+        provider: "TEST",
+        status: "live",
       },
     });
   });
@@ -170,13 +184,13 @@ describe("currency API", () => {
     expect(JSON.stringify(response.json())).not.toContain("Origin not allowed");
   });
 
-  it("maps upstream timeouts to a traceable sanitized 504", async () => {
+  it("maps rate-source timeouts to a traceable sanitized 504", async () => {
     const failingProvider: CurrencyProvider = {
       async getRate() {
-        throw new CurrencyProviderError(504, "SECRET upstream diagnostic that must not leak");
+        throw new CurrencyProviderError(504, "SECRET provider diagnostic that must not leak");
       },
       async getRates() {
-        throw new CurrencyProviderError(504, "SECRET upstream diagnostic that must not leak");
+        throw new CurrencyProviderError(504, "SECRET provider diagnostic that must not leak");
       },
       async getCurrencies() {
         return [];
@@ -191,9 +205,9 @@ describe("currency API", () => {
         url: "/api/v1/rate?from=EUR&to=HUF",
       });
       expect(response.statusCode).toBe(504);
-      expect(response.json().error.code).toBe("UPSTREAM_TIMEOUT");
+      expect(response.json().error.code).toBe("RATE_SOURCE_TIMEOUT");
       expect(response.json().error.requestId).toBe(response.headers["x-request-id"]);
-      expect(JSON.stringify(response.json())).not.toContain("SECRET upstream diagnostic");
+      expect(JSON.stringify(response.json())).not.toContain("SECRET provider diagnostic");
     } finally {
       await failingApp.close();
     }
