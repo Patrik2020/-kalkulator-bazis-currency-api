@@ -1,4 +1,4 @@
-name: Generate lockfile artifact
+name: Generate lockfile
 
 on:
   push:
@@ -6,15 +6,18 @@ on:
       - security/api-hardening-v1
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   lockfile:
+    if: github.repository == 'Patrik2020/-kalkulator-bazis-currency-api' && github.ref == 'refs/heads/security/api-hardening-v1'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: security/api-hardening-v1
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -24,10 +27,15 @@ jobs:
       - name: Generate package-lock.json
         run: npm install --package-lock-only --ignore-scripts
 
-      - name: Upload lockfile
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-lock
-          path: package-lock.json
-          if-no-files-found: error
-          retention-days: 1
+      - name: Commit lockfile if changed
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          if git diff --cached --quiet; then
+            echo "package-lock.json is already current"
+            exit 0
+          fi
+          git commit -m "chore: add reproducible dependency lockfile"
+          git push origin HEAD:security/api-hardening-v1
