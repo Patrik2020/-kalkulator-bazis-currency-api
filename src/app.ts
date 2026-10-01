@@ -4,11 +4,12 @@ import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import Fastify, { type FastifyError } from "fastify";
-import { CurrencyProviderError, FrankfurterClient } from "./frankfurter.js";
-import type { CurrencyProvider } from "./types.js";
+import { createDefaultCurrencyEngine } from "./currency-engine.js";
+import { CurrencyProviderError } from "./errors.js";
+import type { CurrencyProvider, CurrencyRate } from "./types.js";
 
 const SERVICE_NAME = "kalkulator-bazis-currency-api";
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const DEFAULT_ORIGINS = [
   "https://kalkulatorbazis.hu",
   "https://www.kalkulatorbazis.hu",
@@ -60,7 +61,7 @@ const date = {
 const providerCode = {
   type: "string",
   pattern: "^[A-Za-z0-9_-]{2,20}$",
-  description: "Opcionális árfolyamforrás-kulcs, például ECB.",
+  description: "Opcionális forrás: AUTO, LIVE, MNB vagy ECB.",
 } as const;
 
 const rateQuerySchema = {
@@ -136,25 +137,39 @@ function providerErrorStatus(error: CurrencyProviderError): number {
 
 function providerErrorCode(status: number): string {
   if (status === 404) return "RATE_NOT_FOUND";
-  if (status === 400) return "UPSTREAM_REJECTED";
-  if (status === 502) return "UPSTREAM_BAD_RESPONSE";
-  if (status === 504) return "UPSTREAM_TIMEOUT";
-  return "UPSTREAM_UNAVAILABLE";
+  if (status === 400) return "RATE_SOURCE_REJECTED";
+  if (status === 502) return "RATE_SOURCE_BAD_RESPONSE";
+  if (status === 504) return "RATE_SOURCE_TIMEOUT";
+  return "RATE_SOURCE_UNAVAILABLE";
 }
 
 function providerPublicMessage(status: number): string {
   if (status === 404) return "A kért árfolyam nem található.";
-  if (status === 400) return "Az árfolyamforrás nem fogadta el a kérést.";
+  if (status === 400) return "Az árfolyammotor nem tudja teljesíteni ezt a kérést.";
   if (status === 502) return "Az árfolyamforrás érvénytelen választ adott.";
   if (status === 504) return "Az árfolyamforrás nem válaszolt időben.";
   return "Az árfolyamforrás átmenetileg nem érhető el.";
 }
 
+function rateMeta(rates: CurrencyRate[], selectedProvider?: string) {
+  const providers = [...new Set(rates.map((rate) => rate.provider).filter((value): value is string => Boolean(value)))];
+  const statuses = [...new Set(rates.map((rate) => rate.status).filter((value): value is NonNullable<CurrencyRate["status"]> => Boolean(value)))];
+  const timestamps = rates
+    .map((rate) => rate.timestamp)
+    .filter((value): value is string => Boolean(value))
+    .sort();
+
+  return {
+    source: "Kalkulátor Bázis Currency Engine",
+    provider: selectedProvider ?? (providers.length === 1 ? providers[0] : providers.length ? "MIXED" : "AUTO"),
+    status: statuses.length === 1 ? statuses[0] : statuses.length ? "mixed" : "unknown",
+    ...(timestamps.length ? { rateTimestamp: timestamps[0] } : {}),
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 export async function buildApp(options: BuildAppOptions = {}) {
-  const provider = options.provider ?? new FrankfurterClient({
-    baseUrl: process.env.FRANKFURTER_BASE_URL,
-    timeoutMs: Number(process.env.FRANKFURTER_TIMEOUT_MS) || 5_000,
-  });
+  const provider = options.provider ?? createDefaultCurrencyEngine();
   const corsOrigins = new Set(options.corsOrigins ?? (
     process.env.CORS_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean)
     || DEFAULT_ORIGINS
@@ -173,7 +188,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     if (error instanceof CurrencyProviderError) {
       const status = providerErrorStatus(error);
       if (status >= 500) {
-        request.log.warn({ requestId: request.id, status }, "Currency provider error");
+        request.log.warn({ requestId: request.id, status }, "Currency rate source error");
       }
       return reply.status(status).send({
         error: {
@@ -229,7 +244,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       info: {
         title: "Kalkulátor Bázis Currency API",
         version: VERSION,
-        description: "Devizaárfolyam- és devizaváltó API normalizált külső referenciaárfolyam-adatokkal.",
+        description: "Saját többforrásos devizaárfolyam-motor élő piaci, MNB és ECB fallback réteggel.",
       },
       tags: [
         { name: "system", description: "Rendszerállapot" },
@@ -265,6 +280,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
       status: "ok" as const,
       service: SERVICE_NAME,
       version: VERSION,
+      engine: "currency-engine-v2",
+      liveFeedConfigured: Boolean(process.env.TRADINGVIEW_API_KEY?.trim()),
       timestamp: new Date().toISOString(),
     }),
   );
@@ -274,13 +291,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
   }, () => ({
     name: SERVICE_NAME,
     version: VERSION,
+    engine: "currency-engine-v2",
     endpoints: [
       "/api/v1/rate",
       "/api/v1/rates",
       "/api/v1/convert",
       "/api/v1/currencies",
     ],
-    source: "external reference rates",
+    source: "Kalkulátor Bázis Currency Engine",
+    sourcePriority: ["LIVE", "MNB", "ECB", "LAST_KNOWN_GOOD"],
   }));
 
   app.get<{ Querystring: RateQuery }>(
@@ -305,11 +324,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
       return {
         data: rate,
-        meta: {
-          source: "external reference rates",
-          provider: selectedProvider ?? "blended",
-          fetchedAt: new Date().toISOString(),
-        },
+        meta: rateMeta([rate], selectedProvider),
       };
     },
   );
@@ -332,9 +347,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           data: [],
           meta: {
             count: 0,
-            source: "external reference rates",
-            provider: selectedProvider ?? "blended",
-            fetchedAt: new Date().toISOString(),
+            ...rateMeta([], selectedProvider),
           },
         };
       }
@@ -350,9 +363,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
         data: rates,
         meta: {
           count: rates.length,
-          source: "external reference rates",
-          provider: selectedProvider ?? "blended",
-          fetchedAt: new Date().toISOString(),
+          ...rateMeta(rates, selectedProvider),
         },
       };
     },
@@ -387,12 +398,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
           rate: rate.rate,
           convertedAmount: rounded(amount * rate.rate),
           rateDate: rate.date,
+          ...(rate.timestamp ? { rateTimestamp: rate.timestamp } : {}),
         },
         meta: {
-          source: "external reference rates",
-          provider: selectedProvider ?? "blended",
-          fetchedAt: new Date().toISOString(),
-          disclaimer: "Referenciaárfolyam-alapú tájékoztató átváltás; banki és készpénzes árfolyam eltérhet.",
+          ...rateMeta([rate], selectedProvider),
+          disclaimer: "Tájékoztató közép-/referenciaárfolyam; banki, készpénzes és kártyaelszámolási árfolyam eltérhet.",
         },
       };
     },
@@ -420,8 +430,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
         data: currencies,
         meta: {
           count: currencies.length,
-          source: "external reference rates",
-          provider: selectedProvider ?? "all",
+          source: "Kalkulátor Bázis Currency Engine",
+          provider: selectedProvider ?? "ENGINE",
           fetchedAt: new Date().toISOString(),
         },
       };
