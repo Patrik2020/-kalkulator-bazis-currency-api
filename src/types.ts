@@ -1,8 +1,13 @@
+export type RateStatus = "live" | "reference" | "cached";
+
 export type CurrencyRate = {
   date: string;
   base: string;
   quote: string;
   rate: number;
+  timestamp?: string;
+  status?: RateStatus;
+  provider?: string;
 };
 
 export type CurrencyInfo = {
@@ -29,6 +34,8 @@ export type RatesRequest = {
 };
 
 export interface CurrencyProvider {
+  readonly id?: string;
+  readonly kind?: "live" | "reference";
   getRate(input: RateRequest): Promise<CurrencyRate>;
   getRates(input: RatesRequest): Promise<CurrencyRate[]>;
   getCurrencies(input?: { provider?: string }): Promise<CurrencyInfo[]>;
